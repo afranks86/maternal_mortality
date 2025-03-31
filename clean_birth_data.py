@@ -28,32 +28,47 @@ deaths_residual_category_definitions = {
     'total' : None
 }
 
-subgroup_definitions = {
-    'births': births_subgroup_definitions,
-    'deaths': deaths_subgroup_definitions
-}
-
-def clean_dataframe(dat:pd.DataFrame, outcome_type="births", cat_name="total", 
+def clean_dataframe(dat: pd.DataFrame, 
+                    time_resolution: str,
+                    outcome_prefix="mat_deaths_", denom_prefix = "births_",
                     csv_filename='data/dat_quarterly.csv', end_date='2024-01-1',
                     dobbs_donor_sensitivity=False):
     """
     Filters, imputes, and adds relevant columns to the dataframe
     """
 
-    # Set time variable for bimonths
-    dat['time'] = pd.to_datetime(dat.year.astype(str) + '-' + (dat.bacode * 6 - 5).astype(str) + "-01")
 
-    dat['deaths_nonneo'] = dat['deaths_total'] - dat['deaths_neo']
-    #dat['deaths_noncon'] = dat['deaths_total'] - dat['deaths_con']
-    dat['births_con'] = dat['births_noncon'] = dat['births_total']
-    dat['births_neo'] = dat['births_nonneo'] = dat['births_total']
+    dat.rename(columns={
+                    'death_mat_nocovid' : 'mat_deaths_total',
+                    'death_mat_all_nocovid' : "all_mat_deaths_total",
+                    'death_preg_nocovid' : "preg_deaths_total",
+                    'death_preglate_nocovid' : "late_preg_deaths_total",
+                    'death_pregearly_nocovid' : "early_preg_deaths_total",
+                    'death_wra_nocovid' : "wra_deaths_total",
+                    'births' : "births_total"
+                    },
+            inplace=True)
     
-    # Convert "births_nhblack" column to numeric, replacing "Suppressed" with NaN
-    dat['births_nhblack'] = pd.to_numeric(dat['births_nhblack'].replace("Suppressed", pd.NA))
+    if outcome_prefix == "preg_deaths_":
+        dat.rename(columns = {
+            'exposed_dpa' : "exposed"
+        }, inplace=True)
+    elif outcome_prefix == "mat_deaths_" or outcome_prefix == "early_preg_deaths_":
+        dat.rename(columns = {
+            'exposed_dm' : "exposed"
+        }, inplace=True)
+    elif outcome_prefix == "late_preg_deaths_":
+        dat.rename(columns = {
+            'exposed_dpal' : "exposed"
+        }, inplace=True)
+    else:
+        raise ValueError("Invalid outcome prefix")
 
-    # Create a new column 'partial_ban' based on conditions from 'dobbscodev3' column
-    dat['partial_ban'] = dat['dobbscodev3'].apply(lambda x: 1 if x == 2 else 0)
-    #dat['time'] = pd.to_datetime(dat.year.astype(str) + '-' + dat.month, format="%Y-%B")
+    # Set time variable
+    dat['date'] = pd.to_datetime(dat['date'])
+
+    # Filter the DataFrame to keep rows with time before end_date
+    dat = dat[dat['date'] < pd.to_datetime(end_date)]
 
     def fill_in_missing_denoms(dat):
         # Get a list of column names containing the string "pop"
@@ -81,53 +96,44 @@ def clean_dataframe(dat:pd.DataFrame, outcome_type="births", cat_name="total",
     ## Ungroup the result and reset the index
     dat = dat.groupby('state').apply(fill_in_missing_denoms).reset_index(drop=True)
 
-    # create a column that is YYYY-QQ for indexing later
-    #dat = dat.assign(time=dat['year'].astype(str) + '-' + ((dat['q'] - 1) * 3 + 1).astype(str))
-    dat['quarter'] = dat['time'].apply(lambda x: f"{pd.Period(x, freq='Q').start_time.year}-Q{pd.Period(x, freq='Q').quarter}")
+    # Define the aggregation functions for each column
+    agg_dict = {col: 'sum' for col in dat.columns if col.startswith(outcome_prefix) or col.startswith(denom_prefix)}
+    agg_dict.update({'year': 'first', 'exposed': 'max', 
+                     'banned_state': 'max', 'pop_total': 'first', 'births_total': 'sum'})
+    for col in dat.columns:
+        if 'deaths' in col:
+            agg_dict[col] = 'sum'
 
+    # Resample data based on the specified time resolution
+    if time_resolution == "monthly":
+        dat = dat.groupby('state').resample('MS', on='date').agg(agg_dict).reset_index(['state', 'date'])
+    elif time_resolution == "bimonthly":
+        dat = dat.groupby('state').resample('2MS', on='date').agg(agg_dict).reset_index(['state', 'date'])
+    elif time_resolution == "quarterly":
+        dat = dat.groupby('state').resample('QS', on='date').agg(agg_dict).reset_index(['state', 'date'])
+    elif time_resolution == "biannual":
+        dat = dat.groupby('state').resample('2QS', on='date').agg(agg_dict).reset_index(['state', 'date'])
+    else:
+        raise ValueError("Invalid time resolution. Choose from 'monthly', 'bimonthly', 'quarterly', or 'biannual'.")
 
-    ## Correct for different number of days each month
+    dat = dat.sort_values(['state', 'date'])
 
-    # Assuming 'dat' is a DataFrame in Python
-    # Convert 'time' column to datetime if it's not already
-    dat['time'] = pd.to_datetime(dat['time'])
+    # First get all columns that start with outcome_prefix
+    outcome_columns = [col for col in dat.columns if col.startswith(outcome_prefix)]
 
-    # Filter the DataFrame to keep rows with time before end_date
-    dat = dat[dat['time'] < pd.to_datetime(end_date)]
+    # Define the other columns you want to select
+    other_columns = ['state', 'year', 'date', 'births_total', 'banned_state', 'pop_total', 'exposed']
 
-    # Create a control index array DataFrame
-    if outcome_type == "births":
-        dat['exposure_code'] = dat['exposed_births']
-    if outcome_type == "deaths":
-        dat['exposed_infdeaths'] = dat['exposed_infdeaths'].bfill()
-        dat['exposure_code'] = dat['exposed_infdeaths']
+    # Combine the two lists and select from df
+    dat = dat[other_columns + outcome_columns]
 
-    # Convert to a list of unique states with dobbs_code == 1
-    
-    states_with_ban = dat.loc[dat['exposure_code'] == 1, 'state'].unique().tolist()
-
-    # Create a new column 'births_other' by subtracting births of non-Hispanic white, Hispanic, and non-Hispanic black from total births
-    dat['births_other'] = dat['births_total'] - dat['births_nhwhite'] - dat['births_hisp'] - dat['births_nhblack']
-
-    dat = dat.sort_values(['state', 'time'])
-
-    # Remove California for marital
-    if cat_name == "marital":
-        dat = dat[dat["state"] != "California"]
-    
-    if dobbs_donor_sensitivity:
-        sensitivity_states = dat[~dat["dobbscode_sensitivity"].isna()]['state'].unique()
-        sensitivity_states = [state for state in sensitivity_states if state not in ['Arizona', 'Pennsylvania', 'Florida', 'California']]
-        dat = dat[dat["state"].isin(sensitivity_states)]
-    
-    
     if csv_filename is not None:
         ## Save to csv so we don't have to do this every time 
         dat.to_csv(csv_filename)
     return dat
 
 
-def prep_data(dat, group=None, outcome_type="births", variables=None, covariates=None):
+def prep_data(dat, group=None, outcome_prefix="deaths_", denom_prefix = "births_", variables=None, covariates=None):
     """
     Prepare data for analysis by creating DataFrames for births or deaths (numerators), population or births (denominators), control indices, and missing indices.
 
@@ -152,78 +158,49 @@ def prep_data(dat, group=None, outcome_type="births", variables=None, covariates
     if group is not None:
         variables = subgroup_definitions[outcome_type][group]
     
-
-    if outcome_type == "deaths":
-        
-        # Create a list of death column names
-        death_columns = ["deaths_" + var for var in variables]    
-        
-        # Create a deaths DataFrame
-        deaths = (
-            dat[["state", "time"] + death_columns]  # Select 'state', 'time', and death columns
-            .melt(id_vars=["state", "time"], value_vars=death_columns, var_name="category", value_name="deaths")  # Melt death columns into long format
-            .pivot_table(index=["category"], columns=["state", "time"], values="deaths", aggfunc="sum", fill_value=0)  # Pivot to wide format, summing death values
-        )
-
-    # Create a list of birth column names
-    birth_columns = ["births_" + var for var in variables]
+    ## Get outcomes and denoms
+    outcome_columns = [col for col in dat.columns if col.startswith(outcome_prefix)]
+    denom_columns = [col for col in dat.columns if col.startswith(denom_prefix)]
     
-    # Create a list of population column names
-    denom_columns = ["pop_" + var for var in variables]
-
-    if outcome_type == "births":
-        # Create a population DataFrame
-        population = (
-            dat[["state", "time"] + denom_columns]  # Select 'state', 'time', and population columns
-            .melt(id_vars=["state", "time"], value_vars=denom_columns, var_name="category", value_name="population")  # Melt population columns into long format
-            .pivot_table(index=["category"], columns=["state", "time"], values="population", aggfunc="sum", fill_value=0)  # Pivot to wide format, summing population values 
-        ) 
-
-    # Create a births DataFrame
-    births = (
-        dat[["state", "time"] + birth_columns]  # Select 'state', 'time', and birth columns
-        .melt(id_vars=["state", "time"], value_vars=birth_columns, var_name="category", value_name="births")  # Melt birth columns into long format
-        .pivot_table(index=["category"], columns=["state", "time"], values="births", aggfunc="sum", fill_value=0)  # Pivot to wide format, summing birth values
+        
+    # Create an outcomes DataFrame
+    Y = (
+        dat[["state", "date"] + outcome_columns]  # Select 'state', 'time', and death columns
+        .melt(id_vars=["state", "date"], value_vars=outcome_columns, var_name="category", value_name="outcome")  # Melt death columns into long format
+        .pivot_table(index=["category"], columns=["state", "date"], values="outcome", aggfunc="sum", fill_value=0)  # Pivot to wide format, summing death values
     )
-    
-    if outcome_type == "deaths":
-        Y = deaths
-        denominators = births
-        outcome_columns = death_columns
-    else:
-        Y = births
-        denominators = population / 1e4 # Population per 1000
-        outcome_columns = birth_columns
-    
+
+    denominators = (
+        dat[["state", "date"] + denom_columns]  # Select 'state', 'time', and death columns
+        .melt(id_vars=["state", "date"], value_vars=denom_columns, var_name="category", value_name="denominator")  # Melt death columns into long format
+        .pivot_table(index=["category"], columns=["state", "date"], values="denominator", aggfunc="sum", fill_value=0)  # Pivot to wide format, summing death values
+    ) * 10000
+
+
     num_states = len(dat.state.unique())
     total_length = denominators.shape[1]
-    denominators = denominators.values.reshape((len(variables), num_states, denominators.shape[1]//num_states))
-    Y = Y.values.reshape((len(variables), num_states, total_length//num_states))
+    denominators = denominators.values.reshape((len(denom_columns), num_states, denominators.shape[1]//num_states))
+    Y = Y.values.reshape((len(outcome_columns), num_states, total_length//num_states))
 
     control_idx_array = (
-        dat[["state", "time", "exposure_code"] + outcome_columns]  # Select 'state', 'time', 'exposed_births', and birth/death columns
-        .melt(id_vars=["state", "time", "exposure_code"], value_vars=outcome_columns, var_name="category", value_name=outcome_type)  # Melt birth columns into long format
-        .assign(ctrl_index=(lambda x: x["exposure_code"] == 0))  # Create a control index column based on 'exposed_births'
-        .pivot_table(index=["category"], columns=["state", "time"], values="ctrl_index", aggfunc="sum", fill_value=0)  # Pivot to wide format, summing control index values
+        dat[["state", "date", "exposed"] + outcome_columns]  # Select 'state', 'time', 'exposed_births', and birth/death columns
+        .melt(id_vars=["state", "date", "exposed"], value_vars=outcome_columns, var_name="category", value_name="outcome")  # Melt birth columns into long format
+        .assign(ctrl_index=(lambda x: x["exposed"] == 0))  # Create a control index column based on 'exposed_births'
+        .pivot_table(index=["category"], columns=["state", "date"], values="ctrl_index", aggfunc="sum", fill_value=0)  # Pivot to wide format, summing control index values
     ).astype(np.bool_) # cast to a boolean so we don't have issues when we mask
     
-    control_idx_array = control_idx_array.values.reshape((len(variables), num_states, total_length//num_states))
+    control_idx_array = control_idx_array.values.reshape((len(outcome_columns), num_states, total_length//num_states))
 
     # Create a missing index array DataFrame
     missing_idx_array = (
-        dat[["state", "time", "exposure_code"] + outcome_columns]  # Select 'state', 'time', 'exposure_code', and birth columns
-        .melt(id_vars=["state", "time", "exposure_code"], value_vars=outcome_columns, var_name="category", value_name=outcome_type)  # Melt birth columns into long format
-        .assign(missing_index=lambda x: x[outcome_type].isna().astype(int))  # Create a missing index column based on missing birth values
-        .pivot_table(index=["category"], columns=["state", "time"], values="missing_index", aggfunc="sum", fill_value=0)  # Pivot to wide format, summing missing index values
+        dat[["state", "date", "exposed"] + outcome_columns]  # Select 'state', 'time', 'exposed', and birth columns
+        .melt(id_vars=["state", "date", "exposed"], value_vars=outcome_columns, var_name="category", value_name="outcome")  # Melt birth columns into long format
+        .assign(missing_index=lambda x: x["outcome"].isna().astype(int))  # Create a missing index column based on missing birth values
+        .pivot_table(index=["category"], columns=["state", "date"], values="missing_index", aggfunc="sum", fill_value=0)  # Pivot to wide format, summing missing index values
     ).astype(np.bool_) # cast to a boolean so we don't have issues when we mask
     
-    missing_idx_array = missing_idx_array.values.reshape((len(variables), num_states, total_length//num_states))
+    missing_idx_array = missing_idx_array.values.reshape((len(outcome_columns), num_states, total_length//num_states))
 
-    residual_cat_mask_idx_array = np.zeros_like(control_idx_array)
-    if group == "neonatal": 
-        residual_cat_mask_idx_array[variables.index(deaths_residual_category_definitions[group]), :, :] = 1
-    residual_cat_mask_idx_array = residual_cat_mask_idx_array.astype(np.bool_)
-        
     # If covariates are provided, calculate the covariates matrix
     if covariates is not None:
         D_cov = dat.groupby("state")[covariates].mean().reset_index()[covariates].values
@@ -236,11 +213,8 @@ def prep_data(dat, group=None, outcome_type="births", variables=None, covariates
     return {
         "Y": Y,
         "denominators": denominators,
-        #"state_fe": state_fe,
         "control_idx_array": control_idx_array,
         "missing_idx_array": missing_idx_array, 
-        "residual_cat_mask_idx_array": residual_cat_mask_idx_array,
-        #"days_multiplier": days_multiplier,
         "variables": variables,
         "D_cov": D_cov,
     }
