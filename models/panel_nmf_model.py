@@ -13,7 +13,7 @@ def model(
         denominators, 
         control_idx_array, 
         missing_idx_array,
-        residual_cat_mask_idx_array,
+        residual_cat_mask_idx_array = None,
         y=None,
         rank=5,
         outcome_dist="NB",
@@ -46,7 +46,7 @@ def model(
     else:
         residual_cat_mask_idx = residual_cat_mask_idx_array.reshape(-1)
 
-    time_fac_alpha = 20
+    time_fac_alpha = 1
     with numpyro.plate('K', K):
         with numpyro.plate('F', rank):
             with numpyro.plate('N', N):
@@ -58,7 +58,7 @@ def model(
         
         with numpyro.plate('N', N):
             time_fe = jnp.log(numpyro.sample('time_fe',
-                                dist.Gamma(1, 1)
+                                dist.Gamma(2, 2)
                                 ).T
                              )
         with numpyro.plate('D', D):
@@ -96,7 +96,9 @@ def model(
         with numpyro.plate('num_cats', K):
             category_treatment_effect = numpyro.sample('category_treatment_effect', dist.Normal(scale=treatment_category_scale))
         
-        te = numpyro.deterministic('te', jnp.zeros_like(control_idx_array, dtype=float).at[~control_idx_array].add(treatment_kt) + ((~control_idx_array) * state_treatment_effect[None, :, None] + (~control_idx_array) * category_treatment_effect[:, None, None] + (~control_idx_array) * state_category_te[:, :, None]))
+        global_mean = numpyro.sample('global_mean', dist.Normal())
+
+        te = numpyro.deterministic('te', jnp.zeros_like(control_idx_array, dtype=float).at[~control_idx_array].add(treatment_kt) + ((~control_idx_array) * state_treatment_effect[None, :, None] + (~control_idx_array) * category_treatment_effect[:, None, None] + (~control_idx_array) * state_category_te[:, :, None]) + (~control_idx_array)*global_mean)
         mu = numpyro.deterministic('mu', f_all + te)
 
     else:
