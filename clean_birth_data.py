@@ -3,26 +3,13 @@ import pandas as pd
 import re
 
 
-births_subgroup_definitions = {
-        'race': ("nhwhite", "hisp", "nhblack", "otherraceeth"),
-        'edu': ("nohs", "hs", "somecoll", "coll"),
-       # 'edu': ("hs_less", "somecoll_more"),
-        #'age': ("age1519", "age2024", "age2529", "age3034", "age3539", "age4044"),
-        'age': ("age1524", "age2534", "age3544"),
-        'insurance': ("medicaid", "nonmedicaid"),
-        # California should be dropped for marital. 
-        'marital': ("married", "unmarried"),
-        'total': ("total",),
-    }
 deaths_subgroup_definitions = {
-        'race': ("nhwhite", "hisp", "nhblack", "otherraceeth"),
-        'neonatal' : ("neo", "nonneo"),
-        'congenital' : ("con", "noncon"),
+        'race': ("nhwhite", "hispanic", "nhblack", "nhother"),
         'total': ("total",),
     }
 
 deaths_residual_category_definitions = {
-    'race'  : "otherraceeth",
+    'race'  : "nhother",
     'neonatal' : "nonneo",
     'congenital' : "noncon",
     'total' : None
@@ -30,24 +17,53 @@ deaths_residual_category_definitions = {
 
 def clean_dataframe(dat: pd.DataFrame, 
                     time_resolution: str,
-                    outcome_prefix="mat_deaths_", denom_prefix = "births_",
+                    outcome_prefix="mat_deaths_", denom_prefix="births_",
                     csv_filename='data/dat_quarterly.csv', end_date='2024-01-1',
-                    dobbs_donor_sensitivity=False):
+                    race_category="total"):
     """
     Filters, imputes, and adds relevant columns to the dataframe
+    
+    Args:
+        dat (pandas.DataFrame): Input data frame
+        time_resolution (str): Time resolution for resampling ('monthly', 'bimonthly', 'quarterly', 'biannual')
+        outcome_prefix (str): Prefix for outcome columns in the dataset
+        denom_prefix (str): Prefix for denominator columns in the dataset
+        csv_filename (str, optional): Filename to save output CSV. If None, no file is saved
+        end_date (str): End date for data inclusion
+        race_category (str): Race category to analyze ("total", "all", or specific race category)
+        
+    Returns:
+        pandas.DataFrame: Processed dataframe
     """
 
+    dat.rename(columns = {
+        'births': 'births_total' 
+    }, inplace=True)
 
-    dat.rename(columns={
-                    'death_mat_nocovid' : 'mat_deaths_total',
-                    'death_mat_all_nocovid' : "all_mat_deaths_total",
-                    'death_preg_nocovid' : "preg_deaths_total",
-                    'death_preglate_nocovid' : "late_preg_deaths_total",
-                    'death_pregearly_nocovid' : "early_preg_deaths_total",
-                    'death_wra_nocovid' : "wra_deaths_total",
-                    'births' : "births_total"
-                    },
-            inplace=True)
+    # Create mapping patterns for column renaming
+    prefix_mapping = {
+        'death_mat_nocovid': 'mat_deaths_total',
+        'death_mat_all_nocovid': 'all_mat_deaths_total',
+        'death_preg_nocovid': 'preg_deaths_total',
+        'death_preglate_nocovid': 'late_preg_deaths_total',
+        'death_pregearly_nocovid': 'early_preg_deaths_total',
+        'death_wra_nocovid': 'wra_deaths_total',
+    }
+    
+    # Generate race-specific mappings for each death category
+    race_categories = {'_nhwhite': '_nhwhite', '_hispanic': '_hispanic', 
+                     '_nhblack': '_nhblack', '_nhother': '_nhother'}
+    
+    rename_dict = {}
+    # Create full mapping dictionary
+    for old_prefix, new_prefix in prefix_mapping.items():
+        for old_suffix, new_suffix in race_categories.items():
+            if old_suffix == '':  # Handle the 'total' case which doesn't have a suffix in the original
+                rename_dict[old_prefix] = new_prefix
+            else:
+                rename_dict[f"{old_prefix}{old_suffix}"] = f"{new_prefix.replace('_total', '')}{new_suffix}"
+    
+    dat.rename(columns=rename_dict, inplace=True)
     
     if outcome_prefix == "preg_deaths_":
         dat.rename(columns = {
@@ -61,8 +77,35 @@ def clean_dataframe(dat: pd.DataFrame,
         dat.rename(columns = {
             'exposed_dpal' : "exposed"
         }, inplace=True)
+    elif outcome_prefix == "preg_no_mat_deaths_":
+        dat.rename(columns = {
+            'exposed_dpa' : "exposed"
+        }, inplace=True)
+    
+    # Handle race-specific prefixes
+    elif any(rc in outcome_prefix for rc in deaths_subgroup_definitions['race']):
+        # Extract the base prefix before the race category
+        base_prefix = outcome_prefix.split("_")[0] + "_deaths_"
+        if base_prefix == "preg_deaths_":
+            dat.rename(columns = {
+                'exposed_dpa' : "exposed"
+            }, inplace=True)
+        elif base_prefix == "mat_deaths_" or base_prefix == "early_preg_deaths_":
+            dat.rename(columns = {
+                'exposed_dm' : "exposed"
+            }, inplace=True)
+        elif base_prefix == "late_preg_deaths_":
+            dat.rename(columns = {
+                'exposed_dpal' : "exposed"
+            }, inplace=True)
+        elif base_prefix == "preg_no_mat_deaths_":
+            dat.rename(columns = {
+                'exposed_dpa' : "exposed"
+            }, inplace=True)
+        else:
+            raise ValueError(f"Invalid outcome prefix: {outcome_prefix}")
     else:
-        raise ValueError("Invalid outcome prefix")
+        raise ValueError(f"Invalid outcome prefix: {outcome_prefix}")
 
     # Set time variable
     dat['date'] = pd.to_datetime(dat['date'])
@@ -118,11 +161,39 @@ def clean_dataframe(dat: pd.DataFrame,
 
     dat = dat.sort_values(['state', 'date'])
 
-    # First get all columns that start with outcome_prefix
-    outcome_columns = [col for col in dat.columns if col.startswith(outcome_prefix)]
+    # Select outcome columns based on race category
+    if race_category == "all":
+        outcome_columns = []
+        for race in deaths_subgroup_definitions['race']:
+            # Look for columns that include the race category in their name
+            race_specific_columns = [col for col in dat.columns if col.startswith(outcome_prefix) and f"_{race}" in col]
+            outcome_columns.extend(race_specific_columns)
+    else:
+        # For specific race category, select columns that match the prefix and contain the race category
+        if race_category == "total":
+            outcome_columns = [col for col in dat.columns if col.startswith(outcome_prefix) and col.endswith("_total")]
+        else:
+            outcome_columns = [col for col in dat.columns if col.startswith(outcome_prefix) and f"_{race_category}" in col]
 
     # Define the other columns you want to select
-    other_columns = ['state', 'year', 'date', 'births_total', 'banned_state', 'pop_total', 'exposed']
+    other_columns = ['state', 'year', 'date', 'banned_state', 'pop_total', 'exposed']
+    
+    # Add the appropriate births column based on race_category
+    if race_category == "total":
+        births_column = "births_total"
+        other_columns.append(births_column)
+    elif race_category in deaths_subgroup_definitions['race']:
+        births_column = f"births_{race_category}"
+        other_columns.append(births_column)
+    elif race_category == "all":
+        # Include birth columns for all race categories
+        for race in deaths_subgroup_definitions['race']:
+            births_column = f"births_{race}"
+            if births_column in dat.columns:
+                other_columns.append(births_column)
+    else:
+        births_column = "births_total"  # Default fallback
+        other_columns.append(births_column)
 
     # Combine the two lists and select from df
     dat = dat[other_columns + outcome_columns]
@@ -133,49 +204,43 @@ def clean_dataframe(dat: pd.DataFrame,
     return dat
 
 
-def prep_data(dat, group=None, outcome_prefix="deaths_", denom_prefix = "births_", variables=None, covariates=None):
+def prep_data(dat, group=None, outcome_prefix="deaths_", denom_prefix="births_", variables=None, covariates=None):
     """
     Prepare data for analysis by creating DataFrames for births or deaths (numerators), population or births (denominators), control indices, and missing indices.
 
     Args:
         dat (pandas.DataFrame): Input data containing information about births, population, and other relevant variables.
-        variables (list, optional): List of variable names (e.g., "white", "hisp", "black", "other"). Default is ["white", "hisp", "black", "other"].
+        group (str, optional): Group name to use from subgroup_definitions. Default is None.
+        outcome_prefix (str): Prefix for outcome columns. Default is "deaths_".
+        denom_prefix (str): Prefix for denominator columns. Default is "births_".
+        variables (list, optional): List of variable names. Default is None.
         covariates (list, optional): List of covariate names to include in the analysis. Default is None.
 
     Returns:
-        dict: A dictionary containing the following items:
-            Y (pandas.DataFrame): DataFrame with birth counts for each category, state, and time period.
-            population (pandas.DataFrame): DataFrame with population counts for each category, state, and time period.
-            state_fe (numpy.ndarray): Array of state fixed effects.
-            control_idx_array (pandas.DataFrame): DataFrame with control indices for each category, state, and time period.
-            missing_idx_array (pandas.DataFrame): DataFrame with missing indices for each category, state, and time period.
-            days_multiplier (float): Days multiplier value.
-            variables (list): List of variable names used in the analysis.
-            D_cov (numpy.ndarray or None): Matrix of covariates, if provided. If no covariates are provided, D_cov is set to None.
+        dict: A dictionary containing prepared data for analysis.
     """
-    if (group is not None) and (variables is not None):
-        raise Exception("Only one of group/variables can be specified.")
-    if group is not None:
-        variables = subgroup_definitions[outcome_type][group]
-    
+        
     ## Get outcomes and denoms
     outcome_columns = [col for col in dat.columns if col.startswith(outcome_prefix)]
     denom_columns = [col for col in dat.columns if col.startswith(denom_prefix)]
     
-        
+    ## Make sure suffixes match
+    outcome_columns.sort()
+    denom_columns.sort()
+
+    # Rest of the function remains largely the same
     # Create an outcomes DataFrame
     Y = (
-        dat[["state", "date"] + outcome_columns]  # Select 'state', 'time', and death columns
-        .melt(id_vars=["state", "date"], value_vars=outcome_columns, var_name="category", value_name="outcome")  # Melt death columns into long format
-        .pivot_table(index=["category"], columns=["state", "date"], values="outcome", aggfunc="sum", fill_value=0)  # Pivot to wide format, summing death values
+        dat[["state", "date"] + outcome_columns]
+        .melt(id_vars=["state", "date"], value_vars=outcome_columns, var_name="category", value_name="outcome")
+        .pivot_table(index=["category"], columns=["state", "date"], values="outcome", aggfunc="sum", fill_value=0)
     )
 
     denominators = (
-        dat[["state", "date"] + denom_columns]  # Select 'state', 'time', and death columns
-        .melt(id_vars=["state", "date"], value_vars=denom_columns, var_name="category", value_name="denominator")  # Melt death columns into long format
-        .pivot_table(index=["category"], columns=["state", "date"], values="denominator", aggfunc="sum", fill_value=0)  # Pivot to wide format, summing death values
+        dat[["state", "date"] + denom_columns]
+        .melt(id_vars=["state", "date"], value_vars=denom_columns, var_name="category", value_name="denominator")
+        .pivot_table(index=["category"], columns=["state", "date"], values="denominator", aggfunc="sum", fill_value=0)
     ) * 10000
-
 
     num_states = len(dat.state.unique())
     total_length = denominators.shape[1]
@@ -183,21 +248,21 @@ def prep_data(dat, group=None, outcome_prefix="deaths_", denom_prefix = "births_
     Y = Y.values.reshape((len(outcome_columns), num_states, total_length//num_states))
 
     control_idx_array = (
-        dat[["state", "date", "exposed"] + outcome_columns]  # Select 'state', 'time', 'exposed_births', and birth/death columns
-        .melt(id_vars=["state", "date", "exposed"], value_vars=outcome_columns, var_name="category", value_name="outcome")  # Melt birth columns into long format
-        .assign(ctrl_index=(lambda x: x["exposed"] == 0))  # Create a control index column based on 'exposed_births'
-        .pivot_table(index=["category"], columns=["state", "date"], values="ctrl_index", aggfunc="sum", fill_value=0)  # Pivot to wide format, summing control index values
-    ).astype(np.bool_) # cast to a boolean so we don't have issues when we mask
+        dat[["state", "date", "exposed"] + outcome_columns]
+        .melt(id_vars=["state", "date", "exposed"], value_vars=outcome_columns, var_name="category", value_name="outcome")
+        .assign(ctrl_index=(lambda x: x["exposed"] == 0))
+        .pivot_table(index=["category"], columns=["state", "date"], values="ctrl_index", aggfunc="sum", fill_value=0)
+    ).astype(np.bool_)
     
     control_idx_array = control_idx_array.values.reshape((len(outcome_columns), num_states, total_length//num_states))
 
     # Create a missing index array DataFrame
     missing_idx_array = (
-        dat[["state", "date", "exposed"] + outcome_columns]  # Select 'state', 'time', 'exposed', and birth columns
-        .melt(id_vars=["state", "date", "exposed"], value_vars=outcome_columns, var_name="category", value_name="outcome")  # Melt birth columns into long format
-        .assign(missing_index=lambda x: x["outcome"].isna().astype(int))  # Create a missing index column based on missing birth values
-        .pivot_table(index=["category"], columns=["state", "date"], values="missing_index", aggfunc="sum", fill_value=0)  # Pivot to wide format, summing missing index values
-    ).astype(np.bool_) # cast to a boolean so we don't have issues when we mask
+        dat[["state", "date", "exposed"] + outcome_columns]
+        .melt(id_vars=["state", "date", "exposed"], value_vars=outcome_columns, var_name="category", value_name="outcome")
+        .assign(missing_index=lambda x: x["outcome"].isna().astype(int))
+        .pivot_table(index=["category"], columns=["state", "date"], values="missing_index", aggfunc="sum", fill_value=0)
+    ).astype(np.bool_)
     
     missing_idx_array = missing_idx_array.values.reshape((len(outcome_columns), num_states, total_length//num_states))
 
@@ -208,7 +273,6 @@ def prep_data(dat, group=None, outcome_prefix="deaths_", denom_prefix = "births_
     else:
         D_cov = None
     
-
     # Return a dictionary with the calculated values
     return {
         "Y": Y,
@@ -216,7 +280,7 @@ def prep_data(dat, group=None, outcome_prefix="deaths_", denom_prefix = "births_
         "control_idx_array": control_idx_array,
         "missing_idx_array": missing_idx_array, 
         "variables": variables,
-        "D_cov": D_cov,
+        "D_cov": D_cov
     }
 
 def create_unit_placebo_dataset(df, treated_state = "Texas", placebo_state = "California"):

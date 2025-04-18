@@ -26,10 +26,13 @@ placebo_state = None
 num_chains = 1
 end_date = '2024-01-01'
 time_resolution="quarterly"
-def main(dist, time_resolution="monthly", outcome_prefix="mat_deaths_", denom_prefix='births_', rank=5, normalize_deaths=True, missingness=True, 
+race_category = "all"
+def main(dist, time_resolution="monthly", outcome_prefix="mat_deaths_", denom_prefix='births_', rank=5, 
+         normalize_deaths=True, missingness=True, 
          disp_param=1e-4, sample_disp=False, placebo_state=None, placebo_time=None, 
-         end_date='2024-01-01', dobbs_donor_sensitivity=False, model_treated=False,
-         num_chains=num_chains, num_warmup=1000, num_samples=1000):
+         start_date='2016-01-01', end_date='2024-01-01', dobbs_donor_sensitivity=False, model_treated=False,
+         num_chains=num_chains, num_warmup=1000, num_samples=1000, states_exclude=None,
+         file_suffix = "", race_category="total"):
     """
     Runs the maternal mortality analysis model with specified parameters and outputs results.
     
@@ -52,12 +55,17 @@ def main(dist, time_resolution="monthly", outcome_prefix="mat_deaths_", denom_pr
         sample_disp (bool): Whether to sample the dispersion parameter. Default is False.
         placebo_state (str): State to use for placebo analysis. Default is None.
         placebo_time (str): Time to use for placebo analysis. Default is None.
+        start_date (str): Start date for data inclusion. Default is '2016-01-01'.
         end_date (str): End date for data inclusion. Default is '2024-01-01'.
         dobbs_donor_sensitivity (bool): Whether to adjust for Dobbs decision in donor pool. Default is False.
         model_treated (bool): Whether to model the treated units directly. Default is False.
         num_chains (int): Number of MCMC chains to run. Default is from global variable.
         num_warmup (int): Number of warmup samples for MCMC. Default is 1000.
         num_samples (int): Number of posterior samples to collect. Default is 1000.
+        states_exclude (list): List of state names to exclude from the analysis. Default is None.
+        file_suffix (str): Suffix to add to output filenames. Default is "".
+        race_category (str): Race category to analyze. Options: "total" (default), "all" (joint model 
+                            with all race categories), or a specific race category (e.g., "nhblack").
     
     Returns:
         None: Results are saved to CSV files in the 'results' directory.
@@ -65,26 +73,37 @@ def main(dist, time_resolution="monthly", outcome_prefix="mat_deaths_", denom_pr
     
     numpyro.set_host_device_count(num_chains)
     
-    df = pd.read_csv('data/maternalmort_data_20250226.csv')
+    df = pd.read_csv('data/maternalmort_data_20250403.csv')
     # Ensure that both DataFrames have the 'state', 'month', and 'year' columns
     df['date'] = pd.to_datetime(df[['year', 'month']].assign(day=1))
     
+    # Exclude specified states if provided
+    if states_exclude is not None and len(states_exclude) > 0:
+        df = df[~df['state'].isin(states_exclude)]
+    
     from clean_birth_data import prep_data, clean_dataframe, create_unit_placebo_dataset, create_time_placebo_dataset
     
-    df = clean_dataframe(df, time_resolution, outcome_prefix=outcome_prefix, denom_prefix=denom_prefix,
-                         csv_filename=None, 
-                         end_date=end_date, 
-                         dobbs_donor_sensitivity=dobbs_donor_sensitivity)
+    # Process data based on race_category
+
+    df = clean_dataframe(df, time_resolution, outcome_prefix=outcome_prefix, denom_prefix = "births_",
+                        race_category = race_category, csv_filename=None, end_date=end_date)
+
     
     if placebo_state is not None and placebo_state != "Texas":
         df = create_unit_placebo_dataset(df, placebo_state = placebo_state)
     
     if placebo_time is not None:
-        df = create_time_placebo_dataset(df, new_treatment_start = placebo_time, original_earliest_time = "2012-01-01")
+        df = create_time_placebo_dataset(df, new_treatment_start = placebo_time, original_earliest_time = start_date)
     else:
-        # Only use data from 2012 onwards if not using a placebo time #
-        df = df[df['date'] >= pd.to_datetime('2012-01-01')]  
+        # Filter data based on start_date
+        df = df[df['date'] >= pd.to_datetime(start_date)]  
 
+    # For "all" race categories, we need to handle joint modeling
+    if race_category == "all":
+        # Joint model implementation would go here
+        # This might require more complex adjustments to the prep_data and model functions
+        pass
+        
     data_dict_cat = prep_data(df, outcome_prefix=outcome_prefix, denom_prefix=denom_prefix)
 
     if(~normalize_deaths):
@@ -151,10 +170,12 @@ def main(dist, time_resolution="monthly", outcome_prefix="mat_deaths_", denom_pr
     all_samples = params.merge(preds, left_on = ['.draw', '.chain'], right_on = ['.draw', '.chain'])
     results_df = pd.DataFrame(all_samples)
 
-    df.to_csv('results/df_{}{}.csv'.format(outcome_prefix, time_resolution))
+    # Update the filename to include race_category
+    race_suffix = f"_{race_category}" if race_category != "total" else ""
+    df.to_csv(f'results/df_{outcome_prefix}{time_resolution}{race_suffix}{file_suffix}.csv')
 
     results_df.to_csv(
-        'results/{}_{}{}_{}.csv'.format(dist, outcome_prefix, rank, time_resolution)
+        f'results/{dist}_{outcome_prefix}{rank}_{time_resolution}{race_suffix}{file_suffix}.csv'
     )
 
     
@@ -166,13 +187,8 @@ if __name__ == '__main__':
                 
     from joblib import Parallel, delayed
 
-    # Define the inputs for the function
     inputs = [1, 2, 3, 4, 5, 6]
-    # inputs = [2, 3]
-    #inputs = [7, 8, 10]
-    # inputs = [7]
-    # outcome_prefix = "mat_deaths_"
-    outcome_prefix = "preg_deaths_"
+    outcome_prefix = "mat_deaths_"
     denom_prefix = "births_"
     dists = ['Poisson'] # Poisson or NB
     ## dists = ['NB'] # Poisson or NB
@@ -182,21 +198,29 @@ if __name__ == '__main__':
     placebo_times = [None]
     placebo_states = [None]
     sample_disp = False
+    start_date = '2016-01-01'
     end_date = '2024-01-01'
     dobbs_donor_sensitivity = False
     normalize_deaths = True
-
-    args = [(dist, rank, m, disp, p, tm) for dist in dists for rank in inputs 
+    # states_exclude = ['AL','GA']
+    states_exclude = []
+    file_suffix = ""
+    race_categories = ["all"]  # Options: "total", "all", or specific race categories like "nhblack", "nhwhite", etc.
+    
+    args = [(dist, rank, m, disp, p, tm, rc) for dist in dists for rank in inputs 
             for m in missing_flags for disp in disp_params for p in placebo_states 
-            for tm in placebo_times]
+            for tm in placebo_times for rc in race_categories]
     # Run the function in parallel
     results = Parallel(n_jobs=100)(delayed(main)(dist=i[0], 
                                                  time_resolution = "biannual",
                                                  outcome_prefix=outcome_prefix,
                                                  denom_prefix=denom_prefix,
-                                                rank=i[1], normalize_deaths=normalize_deaths,
-                                                missingness=i[2], 
-                                                disp_param=i[3],
-                                                sample_disp=sample_disp, placebo_state=i[4], placebo_time = i[5], 
-                                                end_date=end_date, dobbs_donor_sensitivity=dobbs_donor_sensitivity, 
-                                                model_treated=True, num_chains=4, num_samples=250, num_warmup=1000) for i in args)
+                                                 rank=i[1], normalize_deaths=normalize_deaths,
+                                                 missingness=i[2], 
+                                                 disp_param=i[3],
+                                                 sample_disp=sample_disp, placebo_state=i[4], placebo_time=i[5], 
+                                                 start_date=start_date, end_date=end_date, 
+                                                 dobbs_donor_sensitivity=dobbs_donor_sensitivity, 
+                                                 model_treated=True, num_chains=4, num_samples=250, num_warmup=1000,
+                                                 states_exclude=states_exclude, file_suffix=file_suffix,
+                                                 race_category=i[6]) for i in args)
