@@ -13,7 +13,7 @@ def model(
         denominators, 
         control_idx_array, 
         missing_idx_array,
-        residual_cat_mask_idx_array,
+        residual_cat_mask_idx_array = None,
         y=None,
         rank=5,
         outcome_dist="NB",
@@ -45,14 +45,22 @@ def model(
         residual_cat_mask_idx = np.zeros_like(denominators, dtype=np.bool_).reshape(-1)
     else:
         residual_cat_mask_idx = residual_cat_mask_idx_array.reshape(-1)
-
+    
+    ## Number of categories: K
+    ## Number of time periods: N
+    ## Number latent factors F
     time_fac_alpha = 20
+    with numpyro.plate('F', rank):
+        with numpyro.plate('N', N):
+            global_time_factor = jnp.log(numpyro.sample('time_fac', 
+                    dist.Gamma(time_fac_alpha, time_fac_alpha)
+                    ))
+    
+    time_factor_mult_scale = numpyro.sample('time_factor_mult_scale', dist.HalfNormal(scale=0.1))
     with numpyro.plate('K', K):
         with numpyro.plate('F', rank):
             with numpyro.plate('N', N):
-                raw_time_factor = jnp.log(numpyro.sample('time_fac', 
-                        dist.Gamma(time_fac_alpha, time_fac_alpha)
-                        ))
+                time_factor_mult = numpyro.sample('cat_mult', dist.Normal(0, scale=time_factor_mult_scale))
         with numpyro.plate('D', D):
             state_fe = numpyro.sample('state_fe', dist.ImproperUniform(constraints.positive, (), ())).T
         
@@ -64,7 +72,11 @@ def model(
         with numpyro.plate('D', D):
             unit_weights = jnp.log(numpyro.sample('unit_weight', dist.Dirichlet(jnp.ones(rank))))
     
-    time_factor = jnp.log(jnp.exp(raw_time_factor.transpose(2,0,1)[:, None, :, :] + unit_weights.transpose(1, 0, 2)[:, :, None, :]).sum(-1))
+    # print(global_time_factor.shape)
+    # print(time_factor_mult.shape)
+    # print("-------------")
+    time_factor = jnp.log(jnp.exp((global_time_factor[:, :, None] + time_factor_mult).transpose(2,0,1)[:, None, :, :] + unit_weights.transpose(1, 0, 2)[:, :, None, :]).sum(-1))
+    
 
     # create fixed effects, accounting for dimensions of each and broadcasting apropriately
     fixed_effects = (
@@ -95,14 +107,24 @@ def model(
                 state_category_te = numpyro.sample('state_category_te', dist.Normal(scale=state_category_scale))
         with numpyro.plate('num_cats', K):
             category_treatment_effect = numpyro.sample('category_treatment_effect', dist.Normal(scale=treatment_category_scale))
-        
-        te = numpyro.deterministic('te', jnp.zeros_like(control_idx_array, dtype=float).at[~control_idx_array].add(treatment_kt) + ((~control_idx_array) * state_treatment_effect[None, :, None] + (~control_idx_array) * category_treatment_effect[:, None, None] + (~control_idx_array) * state_category_te[:, :, None]))
+        global_effect = numpyro.sample('global_effect', dist.Normal(scale=1))
+
+        te = numpyro.deterministic(
+            'te',
+            jnp.zeros_like(control_idx_array, dtype=float)
+            .at[~control_idx_array]
+            .add(treatment_kt)
+            + (
+            (~control_idx_array) * global_effect + 
+            (~control_idx_array) * state_treatment_effect[None, :, None]
+            + (~control_idx_array) * category_treatment_effect[:, None, None]
+            + (~control_idx_array) * state_category_te[:, :, None]
+            )
+        )
         mu = numpyro.deterministic('mu', f_all + te)
 
     else:
         mu = numpyro.deterministic('mu', f_all)
-    
-    num_obs = K * D * N
     
     if sample_disp:
         lam = 100
