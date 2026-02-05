@@ -10,16 +10,23 @@ library(kableExtra)
 library(gt)
 source("plot_utilities.R")
 
-
+unnormalized <- TRUE
 for (prefix in c(
-    # "late_preg_deaths",
-    "preg_deaths"
-    #    "mat_deaths"
+    "mat_deaths",
+    "preg_deaths",
+    "pregrel_deaths"
     # "early_preg_deaths"
 )) {
-    for (model_rank in 1:6) {
+    for (model_rank in 1:3) {
         #, "quarterly_placebo_time_2020-04-01")
-        for (suffix in c("quarterly")) {
+        for (suffix in c(
+            "quarterly_placebo_time_2020-04-01"
+        )) {
+            if (unnormalized) {
+                suffix <- paste0(suffix, "_unnormalized")
+            } else {
+                suffix <- paste0(suffix, "_normalized")
+            }
             csv_prefix <- paste0("results/Poisson_", prefix)
             df <- read_csv(sprintf('results/df_%s_%s.csv', prefix, suffix))
 
@@ -101,7 +108,8 @@ for (prefix in c(
                 rate_normalizer = 100000,
                 tab_caption = NULL,
                 footnote_text = "",
-                digits = 1
+                digits = 1,
+                unnormalized = FALSE
             ) {
                 merged_df |> filter(category == target_category) -> merged_df
 
@@ -110,19 +118,25 @@ for (prefix in c(
                     mat_deaths = list(
                         singular = "maternal death",
                         plural = "maternal deaths",
-                        title_case = "Maternal",
+                        title_case = "Maternal deaths",
                         caption = "Expected difference in maternal deaths (count and rate) in states that banned abortion in months affected by bans."
+                    ),
+                    pregrel_deaths = list(
+                        singular = "pregnancy-related death",
+                        plural = "pregnancy-related deaths",
+                        title_case = "Pregnancy-Related deaths",
+                        caption = "Expected difference in pregnancy-related deaths (count and rate) in states that banned abortion in months affected by bans."
                     ),
                     preg_deaths = list(
                         singular = "pregnancy-associated death",
                         plural = "pregnancy-associated deaths",
-                        title_case = "Pregnancy-Associated",
+                        title_case = "Pregnancy-Associated deaths",
                         caption = "Expected difference in pregnancy-associated deaths (count and rate) in states that banned abortion in months affected by bans."
                     ),
                     preg_no_mat = list(
                         singular = "pregnancy-associated (excluding maternal) death",
                         plural = "pregnancy-associated (excluding maternal) deaths",
-                        title_case = "Pregnancy-Associated (Excluding Maternal)",
+                        title_case = "Pregnancy-Associated (Excluding Maternal) deaths",
                         caption = "Expected difference in pregnancy-associated (excluding maternal) deaths (count and rate) in states that banned abortion in months affected by bans."
                     )
                 )
@@ -201,20 +215,32 @@ for (prefix in c(
                             round(exp(mu)),
                             .data[[target]]
                         )),
-                        treated = sum(exp(mu_treated)),
-                        untreated = sum(exp(mu)),
+                        expected_treated_counts = sum(exp(mu) * exp(te)), ## Expected count under exposed (unnormalized)
+                        outcome_diff = round(sum(exp(mu) * (exp(te) - 1))),
+                        expected_untreated_counts = sum(exp(mu)),
+                        ## So that outcome diff is computed from TE but matching to observed deaths
+                        untreated_counts = outcome - outcome_diff, ## Expected count under unexposed (unnormalized)
+                        outcome_rate = outcome /
+                            sum(denom, na.rm = TRUE) *
+                            rate_normalizer,
+
+                        treated_rate = outcome_rate,
+                        expected_treated_rate = sum(exp(mu) * exp(te)) /
+                            sum(denom, na.rm = TRUE) *
+                            rate_normalizer,
+                        expected_untreated_rate = sum(exp(mu)) /
+                            sum(denom, na.rm = TRUE) *
+                            rate_normalizer,
                         denom = sum(denom, na.rm = TRUE),
-                        treated_rate = treated / denom * rate_normalizer,
-                        untreated_rate = untreated / denom * rate_normalizer,
-                        outcome_rate = round(
-                            outcome / denom * rate_normalizer,
-                            digits
-                        ),
-                        outcome_diff = round(treated - untreated)
+                        rate_diff = expected_treated_rate -
+                            expected_untreated_rate,
+                        untreated_rate = treated_rate - rate_diff, ## Only for normalized
+                        te = mean(te)
                     ) %>%
                     ungroup() %>%
                     ## Compute quantiles of effects
                     group_by(state) %>%
+                    ## Average over draws
                     summarize(
                         ypred_mean = mean(ypred),
                         outcome = round(
@@ -236,12 +262,15 @@ for (prefix in c(
                         outcome_rate = mean(outcome_rate),
                         ypred_lower = quantile(ypred, 0.025),
                         ypred_upper = quantile(ypred, 0.975),
-                        treated_mean = mean(treated),
-                        treated_lower = quantile(treated, 0.025),
-                        treated_upper = quantile(treated, 0.975),
-                        untreated_mean = mean(untreated),
-                        untreated_lower = quantile(untreated, 0.025),
-                        untreated_upper = quantile(untreated, 0.975),
+                        untreated_counts_mean = mean(untreated_counts),
+                        untreated_counts_lower = quantile(
+                            untreated_counts,
+                            0.025
+                        ),
+                        untreated_counts_upper = quantile(
+                            untreated_counts,
+                            0.975
+                        ),
                         treated_rate_mean = mean(treated_rate),
                         treated_rate_lower = quantile(treated_rate, 0.025),
                         treated_rate_upper = quantile(treated_rate, 0.975),
@@ -249,51 +278,82 @@ for (prefix in c(
                         untreated_rate_lower = quantile(untreated_rate, 0.025),
                         untreated_rate_upper = quantile(untreated_rate, 0.975),
                         causal_effect_diff_mean = mean(
-                            treated_rate - untreated_rate
+                            if (unnormalized) {
+                                outcome_diff
+                            } else {
+                                rate_diff
+                            }
                         ),
                         causal_effect_diff_lower = quantile(
-                            treated_rate - untreated_rate,
+                            if (unnormalized) {
+                                outcome_diff
+                            } else {
+                                rate_diff
+                            },
                             0.025
                         ),
                         causal_effect_diff_upper = quantile(
-                            treated_rate - untreated_rate,
+                            if (unnormalized) {
+                                outcome_diff
+                            } else {
+                                rate_diff
+                            },
                             0.975
                         ),
                         causal_effect_ratio_mean = mean(
-                            treated_rate / untreated_rate
+                            if (unnormalized) {
+                                expected_treated_counts /
+                                    expected_untreated_counts
+                            } else {
+                                expected_treated_rate /
+                                    expected_untreated_rate
+                            }
                         ),
                         causal_effect_ratio_lower = quantile(
-                            treated_rate / untreated_rate,
+                            if (unnormalized) {
+                                expected_treated_counts /
+                                    expected_untreated_counts
+                            } else {
+                                expected_treated_rate /
+                                    expected_untreated_rate
+                            },
                             0.025
                         ),
                         causal_effect_ratio_upper = quantile(
-                            treated_rate / untreated_rate,
+                            if (unnormalized) {
+                                expected_treated_counts /
+                                    expected_untreated_counts
+                            } else {
+                                expected_treated_rate /
+                                    expected_untreated_rate
+                            },
                             0.975
                         ),
                         denom = mean(denom),
                         pval = 2 *
-                            min(
-                                mean(untreated_rate > treated_rate),
-                                mean(untreated < treated)
-                            )
+                            (if (unnormalized) {
+                                mean(
+                                    expected_untreated_counts >
+                                        expected_treated_counts
+                                )
+                            } else {
+                                mean(untreated_rate < treated_rate)
+                            })
                     )
 
                 table_df <- table_df %>%
                     mutate(
-                        # ypred_mean_rate = ypred_mean / years / (denom / rate_normalizer),
                         outcome_rate = round(outcome_rate, digits),
-                        rate_diff = round(causal_effect_diff_mean, digits),
-                        rate_diff_lower = round(
-                            causal_effect_diff_lower,
-                            digits
-                        ),
-                        rate_diff_upper = round(
-                            causal_effect_diff_upper,
-                            digits
-                        ),
+                        # diff here refers to the causal effect difference
+                        # If unnormalized: diff in counts. If normalized: diff in rates.
+                        diff = round(causal_effect_diff_mean, digits),
+                        diff_lower = round(causal_effect_diff_lower, digits),
+                        diff_upper = round(causal_effect_diff_upper, digits),
+
                         mult_change = causal_effect_ratio_mean,
                         mult_change_lower = causal_effect_ratio_lower,
                         mult_change_upper = causal_effect_ratio_upper,
+
                         # Only apply ordering to non-aggregated states
                         is_aggregate = state %in%
                             c(
@@ -319,11 +379,14 @@ for (prefix in c(
                     arrange(desc(state))
 
                 table_df <- table_df %>%
-                    mutate(untreated_mean = round(untreated_mean, 0)) %>%
+                    mutate(
+                        untreated_counts_mean = round(untreated_counts_mean, 0)
+                    ) %>%
                     mutate(
                         untreated_rate_mean = round(untreated_rate_mean, digits)
                     ) %>%
                     mutate(
+                        # Diff string for counts (always available)
                         death_counts_str = paste0(
                             outcome_diff_mean,
                             " (",
@@ -331,20 +394,19 @@ for (prefix in c(
                             ", ",
                             outcome_diff_upper,
                             ")"
-                        )
-                    ) %>%
-                    mutate(
-                        death_rate_abs_str = paste0(
-                            rate_diff,
+                        ),
+                        # Diff string for generic difference (Rate if normalized, Count if unnormalized)
+                        diff_str = paste0(
+                            diff,
                             " (",
-                            rate_diff_lower,
+                            diff_lower,
                             ", ",
-                            rate_diff_upper,
+                            diff_upper,
                             ")"
                         )
                     ) %>%
                     mutate(
-                        death_rate_pct_str = paste0(
+                        mult_change_string = paste0(
                             round(100 * (mult_change - 1), digits),
                             " (",
                             round(100 * (mult_change_lower - 1), digits),
@@ -361,7 +423,7 @@ for (prefix in c(
                     mutate(
                         state = paste0(
                             state,
-                            ifelse(rate_diff_lower >= 0, "*", "")
+                            ifelse(diff_lower > 0 | diff_upper < 0, "*", "")
                         )
                     )
 
@@ -386,24 +448,49 @@ for (prefix in c(
                     arrange(row_order, desc(mult_change)) %>% # Sort by row_order first, then by mult_change
                     select(-c(is_aggregated, row_order)) # Remove helper columns
 
-                table_df %>%
+                table_df <- table_df %>%
+                    mutate(
+                        expected_outcome = untreated_counts_mean,
+                        expected_rate = untreated_rate_mean
+                    ) %>%
+                    mutate(
+                        # Store original numeric outcome for comparison
+                        outcome_numeric = as.numeric(outcome),
+                        # Replace with "S" if observed deaths < 10
+                        outcome = ifelse(
+                            outcome_numeric < 10,
+                            "S",
+                            as.character(outcome)
+                        ),
+                        expected_outcome = ifelse(
+                            outcome_numeric < 10,
+                            "S",
+                            as.character(expected_outcome)
+                        ),
+                        outcome_rate = ifelse(
+                            outcome_numeric < 10,
+                            "S",
+                            as.character(outcome_rate)
+                        ),
+                        expected_rate = ifelse(
+                            outcome_numeric < 10,
+                            "S",
+                            as.character(expected_rate)
+                        )
+                    )
+
+                gt_tbl <- table_df %>%
                     select(
                         state,
                         denom,
                         outcome,
-                        outcome_diff_mean,
-                        outcome_rate,
-                        rate_diff,
+                        expected_outcome,
                         death_counts_str,
-                        death_rate_abs_str,
-                        death_rate_pct_str
+                        outcome_rate,
+                        expected_rate,
+                        diff_str,
+                        mult_change_string
                     ) %>%
-                    mutate(
-                        expected_outcome = outcome - outcome_diff_mean,
-                        expected_rate = round(outcome_rate - rate_diff, digits)
-                    ) %>%
-                    mutate(outcome = as.character(outcome)) %>%
-                    select(-c("outcome_diff_mean", "rate_diff")) %>%
                     gt(rowname_col = "state") |>
                     tab_header(
                         title = tab_caption
@@ -422,44 +509,71 @@ for (prefix in c(
                             md("**Aggregated**"),
                             md("**States with bans**")
                         )
-                    ) |>
+                    )
 
-                    ### COLUMN OPERATIONS
-                    tab_spanner(
-                        label = paste(
-                            labels$title_case,
-                            "mortality rate (per 100,000 live births)"
-                        ),
-                        columns = c(
-                            outcome_rate,
-                            expected_rate,
-                            death_rate_abs_str,
-                            death_rate_pct_str
+                if (unnormalized) {
+                    gt_tbl <- gt_tbl |>
+                        cols_hide(
+                            columns = c(
+                                "outcome_rate",
+                                "expected_rate",
+                                "diff_str"
+                            )
+                        ) |>
+                        # Spanner for counts
+                        tab_spanner(
+                            label = labels$title_case,
+                            columns = c(
+                                "outcome",
+                                "expected_outcome",
+                                "death_counts_str",
+                                "mult_change_string"
+                            )
+                        ) |>
+                        cols_label(
+                            outcome = "Observed",
+                            expected_outcome = "Expected",
+                            death_counts_str = html("Difference<br>(95% CI)"),
+                            mult_change_string = html(
+                                "Percent change<br>(95% CI)"
+                            ),
+                            denom = "Births"
                         )
-                    ) |>
-                    tab_spanner(
-                        label = labels$title_case,
-                        columns = c(outcome, expected_outcome, death_counts_str)
-                    ) |>
-                    cols_label(
-                        denom = "Births",
-                        outcome_rate = "Observed",
-                        expected_rate = "Expected",
-                        death_rate_abs_str = html(
-                            "Expected difference<br>(95% CI)"
-                        ),
-                        death_rate_pct_str = html(
-                            "Expected percent change<br>(95% CI)"
-                        ),
-                        outcome = "Observed",
-                        expected_outcome = "Expected",
-                        death_counts_str = html(
-                            "Expected difference<br>(95% CI)"
-                        ),
-                    ) -> table_df
+                } else {
+                    gt_tbl <- gt_tbl |>
+                        cols_hide(
+                            columns = c(
+                                "outcome",
+                                "expected_outcome",
+                                "death_counts_str"
+                            )
+                        ) |>
+                        # Spanner for rates
+                        tab_spanner(
+                            label = paste(
+                                labels$title_case,
+                                "mortality rate (per 100,000 live births)"
+                            ),
+                            columns = c(
+                                "outcome_rate",
+                                "expected_rate",
+                                "diff_str",
+                                "mult_change_string"
+                            )
+                        ) |>
+                        cols_label(
+                            outcome_rate = "Observed",
+                            expected_rate = "Expected",
+                            diff_str = html("Difference<br>(95% CI)"),
+                            mult_change_string = html(
+                                "Percent change<br>(95% CI)"
+                            ),
+                            denom = "Births"
+                        )
+                }
 
                 ## Styling
-                table_df |>
+                gt_tbl |>
                     tab_options(table.align = "left", heading.align = "left") |>
                     cols_align(align = "left") |>
                     cols_hide(state) |>
@@ -467,20 +581,23 @@ for (prefix in c(
                     opt_vertical_padding(scale = 0.5) |>
                     cols_width(
                         state ~ px(125),
-                        death_rate_abs_str ~ px(100),
-                        death_rate_pct_str ~ px(100),
-                        outcome_rate ~ px(50),
-                        death_counts_str ~ px(100),
+                        mult_change_string ~ px(100),
                         outcome ~ px(50),
-                        denom ~ px(50),
                         expected_outcome ~ px(50),
-                        expected_rate ~ px(50)
+                        outcome_rate ~ px(50),
+                        expected_rate ~ px(50),
+                        death_counts_str ~ px(100),
+                        diff_str ~ px(100),
+                        denom ~ px(50)
                     ) -> table_df_final
 
                 table_df_final |> tab_footnote(html(footnote_text))
             }
 
-            total_states_tab <- make_state_table(merged_df)
+            total_states_tab <- make_state_table(
+                merged_df,
+                unnormalized = unnormalized
+            )
 
             total_states_tab |>
                 gtsave(
@@ -504,6 +621,49 @@ for (prefix in c(
             # banned_states <- sort(unique(merged_df$state))
             for (s in banned_states) {
                 for (c in unique(merged_df$category)) {
+                    sf <- make_state_fit_plot(
+                        quantiles_df,
+                        state_name = s,
+                        category = c,
+                        target = "deaths"
+                    ) +
+                        plot_annotation(title = c)
+                    print(sf)
+                    ggsave(
+                        sprintf(
+                            "figs/fits/%s_state_fit_%s_%i_%s_%s.png",
+                            prefix,
+                            s,
+                            model_rank,
+                            suffix,
+                            c
+                        ),
+                        plot = sf,
+                        width = 10,
+                        height = 10
+                    )
+
+                    gp <- make_gap_plot(
+                        quantiles_df,
+                        state_name = s,
+                        category = c,
+                        target = "deaths"
+                    ) +
+                        plot_annotation(title = c)
+                    print(gp)
+                    ggsave(
+                        sprintf(
+                            "figs/fits/%s_gap_plot_%s_%i_%s_%s.png",
+                            prefix,
+                            s,
+                            model_rank,
+                            suffix,
+                            c
+                        ),
+                        plot = gp,
+                        width = 10,
+                        height = 10
+                    )
                     plts <- make_all_te_plots(
                         merged_df,
                         quantiles_df,
@@ -533,10 +693,10 @@ for (prefix in c(
             categories <- c("total")
             ppc_states <- c(
                 "States With Bans (excluding Texas)",
-                "Texas",
+                "TX",
                 "States Without Bans"
             )
-            ppc_states <- unique(merged_df$state[merged_df$banned_state == 1])
+            #ppc_states <- unique(merged_df$state[merged_df$banned_state == 1])
             ppc_outcome <- "deaths"
 
             rmse_res <- make_rmse_ppc_plot(
