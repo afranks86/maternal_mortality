@@ -18,6 +18,7 @@ deaths_residual_category_definitions = {
 def clean_dataframe(dat: pd.DataFrame, 
                     time_resolution: str,
                     outcome_prefix="mat_deaths_", denom_prefix="births_",
+                    exclude_covid=True,
                     csv_filename='data/dat_quarterly.csv', end_date='2024-01-1',
                     race_category="total"):
     """
@@ -40,32 +41,54 @@ def clean_dataframe(dat: pd.DataFrame,
         'births': 'births_total' 
     }, inplace=True)
 
-    # Create mapping patterns for column renaming
-    prefix_mapping = {
-        'death_mat_nocovid': 'mat_deaths_total',
-        'death_mat_all_nocovid': 'all_mat_deaths_total',
-        'death_preg_nocovid': 'preg_deaths_total',
-        'death_preglate_nocovid': 'late_preg_deaths_total',
-        'death_pregearly_nocovid': 'early_preg_deaths_total',
-        'death_wra_nocovid': 'wra_deaths_total',
-    }
+    
+    # Create mapping patterns for column renaming based on exclude_covid setting
+    if exclude_covid:
+        prefix_mapping = {
+            'death_mat_nocovid': 'mat_deaths_total',
+            'death_mat_all_nocovid': 'all_mat_deaths_total',
+            'death_pregrel_nocovid' : 'pregrel_deaths_total',
+            'death_preg_nocovid': 'preg_deaths_total',
+            'death_preglate_nocovid': 'late_preg_deaths_total',
+            'death_pregearly_nocovid': 'early_preg_deaths_total',
+            'death_wra_nocovid': 'wra_deaths_total',
+        }
+    else:
+        prefix_mapping = {
+            'death_mat': 'mat_deaths_total',
+            'death_mat_all': 'all_mat_deaths_total',
+            'death_preg': 'preg_deaths_total',
+            'death_pregrel' : 'pregrel_deaths_total',
+            'death_preglate': 'late_preg_deaths_total',
+            'death_pregearly': 'early_preg_deaths_total',
+            'death_wra': 'wra_deaths_total',
+        }
     
     # Generate race-specific mappings for each death category
     race_categories = {'_nhwhite': '_nhwhite', '_hispanic': '_hispanic', 
                      '_nhblack': '_nhblack', '_nhother': '_nhother'}
     
     rename_dict = {}
-    # Create full mapping dictionary
+    
+    # First add the base mappings (for totals)
+    for old_prefix, new_prefix in prefix_mapping.items():
+        rename_dict[old_prefix] = new_prefix
+    
+    # Then add race-specific mappings
     for old_prefix, new_prefix in prefix_mapping.items():
         for old_suffix, new_suffix in race_categories.items():
-            if old_suffix == '':  # Handle the 'total' case which doesn't have a suffix in the original
-                rename_dict[old_prefix] = new_prefix
-            else:
-                rename_dict[f"{old_prefix}{old_suffix}"] = f"{new_prefix.replace('_total', '')}{new_suffix}"
+            old_col = f"{old_prefix}{old_suffix}"
+            # Remove "_total" from the base prefix when adding a race suffix
+            new_col = f"{new_prefix.replace('_total', '')}{new_suffix}"
+            rename_dict[old_col] = new_col
     
+    # Also make sure births are handled correctly
+    rename_dict['births'] = 'births_total'
+    
+    # Apply the renaming
     dat.rename(columns=rename_dict, inplace=True)
     
-    if outcome_prefix == "preg_deaths_":
+    if outcome_prefix == "preg_deaths_" or outcome_prefix == "pregrel_deaths_":
         dat.rename(columns = {
             'exposed_dpa' : "exposed"
         }, inplace=True)
@@ -86,7 +109,7 @@ def clean_dataframe(dat: pd.DataFrame,
     elif any(rc in outcome_prefix for rc in deaths_subgroup_definitions['race']):
         # Extract the base prefix before the race category
         base_prefix = outcome_prefix.split("_")[0] + "_deaths_"
-        if base_prefix == "preg_deaths_":
+        if base_prefix == "preg_deaths_" or base_prefix == "pregrel_deaths_":
             dat.rename(columns = {
                 'exposed_dpa' : "exposed"
             }, inplace=True)
@@ -169,6 +192,8 @@ def clean_dataframe(dat: pd.DataFrame,
             race_specific_columns = [col for col in dat.columns if col.startswith(outcome_prefix) and f"_{race}" in col]
             outcome_columns.extend(race_specific_columns)
     else:
+        print(dat.columns)
+        print(outcome_prefix)
         # For specific race category, select columns that match the prefix and contain the race category
         if race_category == "total":
             outcome_columns = [col for col in dat.columns if col.startswith(outcome_prefix) and col.endswith("_total")]
@@ -310,7 +335,7 @@ def create_unit_placebo_dataset(df, treated_state = "Texas", placebo_state = "Ca
     # Filter the DataFrame to keep rows where 'state' is not equal to the treated state
     return df[df["state"] != treated_state]
 
-def create_time_placebo_dataset(df, new_treatment_start="2022-05-01", original_earliest_time = "2012-01-01"):
+def create_time_placebo_dataset(df, time_resolution, new_treatment_start="2022-05-01", original_earliest_time = "2016-01-01"):
     """
     Create a time placebo dataset by shifting treatment times early and capping the end date.
     
@@ -324,46 +349,86 @@ def create_time_placebo_dataset(df, new_treatment_start="2022-05-01", original_e
     
     print("Creating placebo-in-time dataset starting in {}".format(new_treatment_start))
     
-    def round_date_to_nearest_half_year(ts: pd.Timestamp) -> pd.Timestamp:
-        if 4 <= ts.month <=8:
-            return pd.Timestamp(ts.year, 7, 1)
-        elif ts.month >=9:
-            return pd.Timestamp(ts.year+1, 1, 1)
-        elif ts.month <= 3:
-            return pd.Timestamp(ts.year, 1, 1)
+    def round_date_to_nearest_time_resolution(ts: pd.Timestamp, time_resolution: str = "biannual") -> pd.Timestamp:
+        """
+        Rounds a timestamp to the nearest period based on the specified time resolution.
+        
+        Args:
+            ts (pd.Timestamp): The timestamp to round.
+            time_resolution (str): The time resolution to round to. Options are:
+                - "monthly": Round to the first day of the month
+                - "quarterly": Round to the first day of the nearest quarter (Jan, Apr, Jul, Oct)
+                - "biannual": Round to the first day of the nearest half-year (Jan or Jul)
+                - "annual": Round to the first day of the year
+                
+        Returns:
+            pd.Timestamp: The rounded timestamp.
+        """
+        if time_resolution == "monthly":
+            # Round to the first day of the current month
+            return pd.Timestamp(ts.year, ts.month, 1)
+        
+        elif time_resolution == "quarterly":
+            # Round to the first day of the nearest quarter
+            if ts.month <= 2:
+                return pd.Timestamp(ts.year, 1, 1)  # Q1: Jan
+            elif ts.month <= 5:
+                return pd.Timestamp(ts.year, 4, 1)  # Q2: Apr
+            elif ts.month <= 8:
+                return pd.Timestamp(ts.year, 7, 1)  # Q3: Jul
+            else:
+                return pd.Timestamp(ts.year, 10, 1) # Q4: Oct
+        
+        elif time_resolution == "biannual":
+            # Round to the first day of the nearest half-year
+            if ts.month <= 3:
+                return pd.Timestamp(ts.year, 1, 1)  # First half: Jan
+            elif ts.month <= 8:
+                return pd.Timestamp(ts.year, 7, 1)  # Second half: Jul
+            else:
+                return pd.Timestamp(ts.year + 1, 1, 1)  # Next year: Jan
+        
+        elif time_resolution == "annual":
+            # Round to the first day of the year
+            if ts.month <= 6:
+                return pd.Timestamp(ts.year, 1, 1)  # Current year
+            else:
+                return pd.Timestamp(ts.year + 1, 1, 1)  # Next year
+        
         else:
-            raise Exception("Logic error.")
-
+            raise ValueError(f"Invalid time resolution: {time_resolution}. Choose from 'monthly', 'quarterly', 'biannual', or 'annual'.")
     # Convert 'first_treatment_start' to datetime
         
     new_treatment_start = pd.to_datetime(new_treatment_start)
-    original_treatment_start = df.loc[df['exposure_code'] == 1, 'time'].min()
+    original_treatment_start = df.loc[df['exposed'] == 1, 'date'].min()
 
-    end_date = df.loc[df['exposure_code'] == 1, 'time'].max()
+    end_date = df.loc[df['exposed'] == 1, 'date'].max()
     
     new_end = new_treatment_start + (end_date - original_treatment_start)
     
     original_time_length = end_date - pd.to_datetime(original_earliest_time)
     new_start = (new_end - original_time_length)
-    if new_start < df["time"].min():
-        new_start = df["time"].min()
+    if new_start < df["date"].min():
+        new_start = df["date"].min()
     
-    new_start = round_date_to_nearest_half_year(new_start)
-    new_end = round_date_to_nearest_half_year(new_end)
-    
+    new_start = round_date_to_nearest_time_resolution(new_start, time_resolution=time_resolution)
+    new_end = round_date_to_nearest_time_resolution(new_end, time_resolution=time_resolution)
+    print("New start date: {}, New end date: {}".format(new_start, new_end))
     new_time_length = new_end - new_start
 
     # Get the columns that start with 'exposure_code'
-    exposure_code_values = df.loc[(df['time'] >= end_date - new_time_length), ['exposure_code']]
+    exposure_code_values = df.loc[(df['date'] >= end_date - new_time_length), ['exposed']]
 
-    df = df[(df['time'] <= new_end) & (df['time'] >= new_start)]
+    filtered_df = df[(df['date'] <= new_end) & (df['date'] >= new_start)].copy()
 
-    if len(exposure_code_values) == len(df):
-        df.loc[:, "exposure_code"] = exposure_code_values.values
+    if len(exposure_code_values) == len(filtered_df):
+        filtered_df['exposed'] = exposure_code_values.values
     else:
+        print(len(exposure_code_values))
+        print(len(df))
         raise ValueError("The length of new exposure_code values does not match the number of rows in df")
 
-    return df
+    return filtered_df
 
 if __name__ == '__main__':
     import argparse

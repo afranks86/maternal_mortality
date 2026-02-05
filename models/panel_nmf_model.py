@@ -57,6 +57,9 @@ def model(
                     ))
     
     time_factor_mult_scale = numpyro.sample('time_factor_mult_scale', dist.HalfNormal(scale=0.1))
+    # with numpyro.plate('D', D):
+    #     unit_weights_global = jnp.log(numpyro.sample('unit_weight_global', dist.Dirichlet(jnp.ones(rank))))
+
     with numpyro.plate('K', K):
         with numpyro.plate('F', rank):
             with numpyro.plate('N', N):
@@ -72,25 +75,33 @@ def model(
         with numpyro.plate('D', D):
             unit_weights = jnp.log(numpyro.sample('unit_weight', dist.Dirichlet(jnp.ones(rank))))
     
-    # print(global_time_factor.shape)
-    # print(time_factor_mult.shape)
-    # print("-------------")
-    time_factor = jnp.log(jnp.exp((global_time_factor[:, :, None] + time_factor_mult).transpose(2,0,1)[:, None, :, :] + unit_weights.transpose(1, 0, 2)[:, :, None, :]).sum(-1))
-    
-
+    ## If subgroups
+    if K > 1:
+        time_factor = jnp.log(jnp.exp((global_time_factor[:, :, None] + time_factor_mult).transpose(2,0,1)[:, None, :, :] + unit_weights.transpose(1, 0, 2)[:, :, None, :]).sum(-1))
+    else:
+        time_factor = jnp.log(jnp.exp((global_time_factor[:, :, None]).transpose(2,0,1)[:, None, :, :] + unit_weights.transpose(1, 0, 2)[:, :, None, :]).sum(-1))
     # create fixed effects, accounting for dimensions of each and broadcasting apropriately
     fixed_effects = (
         state_fe[:, :, None] 
         + time_fe[:, None, :]
     )
 
-    f_all = numpyro.deterministic(
-        "mu_ctrl",
-        time_factor + 
-        fixed_effects + 
-        # we want births per 10k
-        jnp.log(denominators) #.sum(0)[None, ...]) #+ 
-    )
+    ## F==1 is a rank 0 model because unit weights are on the simplex
+    if(rank <= 1):
+        f_all = numpyro.deterministic(
+            "mu_ctrl",
+            fixed_effects +
+            # we want births per 10k
+            jnp.log(denominators) #.sum(0)[None, ...]) #+ 
+        )
+    else:
+        f_all = numpyro.deterministic(
+            "mu_ctrl",
+            time_factor + 
+            fixed_effects + 
+            # we want births per 10k
+            jnp.log(denominators) #.sum(0)[None, ...]) #+ 
+        )
 
     if model_treated:
         

@@ -1,5 +1,8 @@
 #import os
 #os.chdir("birthrate_mtgp")
+import os
+os.environ['JAX_PLATFORM_NAME'] = 'cpu'
+
 from jax import numpy as jnp
 import numpy as np
 import numpyro.distributions as dist
@@ -9,11 +12,12 @@ from numpyro.handlers import scope
 
 from models.panel_nmf_model import model
 from numpyro_to_draws_df_csv import dict_to_tidybayes
+import sys
 
 import pandas as pd
 
 dist = "Poisson"
-outcome_prefix = "preg_deaths_"
+outcome_prefix = "pregrel_deaths_"
 denom_prefix = "births_"
 rank = 5
 sample_disp = False
@@ -24,15 +28,24 @@ dobbs_donor_sensitivity = False
 placebo_time = None
 placebo_state = None
 num_chains = 1
+num_warmup = 1000
+num_samples = 1000
 end_date = '2024-01-01'
 time_resolution="quarterly"
-race_category = "all"
-def main(dist, time_resolution="monthly", outcome_prefix="mat_deaths_", denom_prefix='births_', rank=5, 
+race_category = "total"
+exclude_covid = True
+start_date='2016-01-01'
+placebo_time = "2020-04-01"
+original_earliest_time = "2016-01-01"
+
+def main(dist, time_resolution="monthly", outcome_prefix="mat_deaths_", denom_prefix='births_', 
+         exclude_covid=exclude_covid,
+         rank=5, 
          normalize_deaths=True, missingness=True, 
          disp_param=1e-4, sample_disp=False, placebo_state=None, placebo_time=None, 
          start_date='2016-01-01', end_date='2024-01-01', dobbs_donor_sensitivity=False, model_treated=False,
          num_chains=num_chains, num_warmup=1000, num_samples=1000, states_exclude=None,
-         file_suffix = "", race_category="total"):
+         file_suffix = "", race_category="all"):
     """
     Runs the maternal mortality analysis model with specified parameters and outputs results.
     
@@ -73,7 +86,7 @@ def main(dist, time_resolution="monthly", outcome_prefix="mat_deaths_", denom_pr
     
     numpyro.set_host_device_count(num_chains)
     
-    df = pd.read_csv('data/maternalmort_data_20250403.csv')
+    df = pd.read_csv('data/maternalmort_data_20251022.csv')
     # Ensure that both DataFrames have the 'state', 'month', and 'year' columns
     df['date'] = pd.to_datetime(df[['year', 'month']].assign(day=1))
     
@@ -86,14 +99,17 @@ def main(dist, time_resolution="monthly", outcome_prefix="mat_deaths_", denom_pr
     # Process data based on race_category
 
     df = clean_dataframe(df, time_resolution, outcome_prefix=outcome_prefix, denom_prefix = "births_",
+                         exclude_covid = exclude_covid,
                         race_category = race_category, csv_filename=None, end_date=end_date)
 
     
     if placebo_state is not None and placebo_state != "Texas":
         df = create_unit_placebo_dataset(df, placebo_state = placebo_state)
-    
+    print("-------------")
+    print(placebo_time)
+    print("-------------")
     if placebo_time is not None:
-        df = create_time_placebo_dataset(df, new_treatment_start = placebo_time, original_earliest_time = start_date)
+        df = create_time_placebo_dataset(df, time_resolution, new_treatment_start = placebo_time, original_earliest_time = start_date)
     else:
         # Filter data based on start_date
         df = df[df['date'] >= pd.to_datetime(start_date)]  
@@ -106,7 +122,12 @@ def main(dist, time_resolution="monthly", outcome_prefix="mat_deaths_", denom_pr
         
     data_dict_cat = prep_data(df, outcome_prefix=outcome_prefix, denom_prefix=denom_prefix)
 
-    if(~normalize_deaths):
+    print(data_dict_cat['Y'].shape)
+    print(data_dict_cat['denominators'].shape)
+    print(data_dict_cat['control_idx_array'].shape)
+    print((~data_dict_cat['control_idx_array']).sum())
+
+    if(not normalize_deaths):
         data_dict_cat['denominators'] = np.ones(data_dict_cat['denominators'].shape)
     
     from jax import random
@@ -125,9 +146,9 @@ def main(dist, time_resolution="monthly", outcome_prefix="mat_deaths_", denom_pr
         num_warmup=num_warmup,
         num_samples=num_samples,
         num_chains=num_chains,
-        progress_bar=True
+        progress_bar=False
     )
-
+    
     mcmc.run(
         rng_key_,
         y=data_dict_cat['Y'],
@@ -170,6 +191,25 @@ def main(dist, time_resolution="monthly", outcome_prefix="mat_deaths_", denom_pr
     all_samples = params.merge(preds, left_on = ['.draw', '.chain'], right_on = ['.draw', '.chain'])
     results_df = pd.DataFrame(all_samples)
 
+    
+    if file_suffix == "":
+        # If no file suffix is provided, use the default naming convention
+        file_suffix = "_with_covid" if not exclude_covid else ""
+    
+    if placebo_state is not None:
+        file_suffix += f"_placebo_state_{placebo_state}"
+    
+    if placebo_time is not None:
+        file_suffix += f"_placebo_time_{placebo_time}"
+
+    if states_exclude is not None and len(states_exclude) > 0 and states_exclude != ['']:
+        file_suffix += f"_no_{'_'.join(states_exclude)}"
+
+    if not normalize_deaths:
+        file_suffix += "_unnormalized"
+    else:
+        file_suffix += "_normalized"
+
     # Update the filename to include race_category
     race_suffix = f"_{race_category}" if race_category != "total" else ""
     df.to_csv(f'results/df_{outcome_prefix}{time_resolution}{race_suffix}{file_suffix}.csv')
@@ -187,8 +227,8 @@ if __name__ == '__main__':
                 
     from joblib import Parallel, delayed
 
-    inputs = [1, 2, 3, 4, 5, 6]
-    outcome_prefix = "mat_deaths_"
+    inputs = [1, 2, 3,]
+    outcome_prefixes = ["pregrel_deaths_","preg_deaths_", "mat_deaths_"]
     denom_prefix = "births_"
     dists = ['Poisson'] # Poisson or NB
     ## dists = ['NB'] # Poisson or NB
@@ -196,31 +236,44 @@ if __name__ == '__main__':
     # disp_params = [1e-4, 1e-3]
     disp_params = [1e-4]
     placebo_times = [None]
+    # placebo_times = ["2020-04-01"]  
     placebo_states = [None]
     sample_disp = False
+    exclude_covid= True
+    #exclude_covid = False
+    time_resolution = "quarterly"
     start_date = '2016-01-01'
     end_date = '2024-01-01'
     dobbs_donor_sensitivity = False
-    normalize_deaths = True
-    # states_exclude = ['AL','GA']
-    states_exclude = []
-    file_suffix = ""
-    race_categories = ["all"]  # Options: "total", "all", or specific race categories like "nhblack", "nhwhite", etc.
+    normalization_types = [True, False]
+    states_exclude = ['']
+    #states_exclude = ['']
+    # if states_exclude != ['']:
+    #     file_suffix = "_no_{states_exclude}".format(states_exclude = "_".join(states_exclude)) if len(states_exclude) > 0 else ""
+    # else:
+    #     file_suffix = ""
+    # if not exclude_covid:
+    #     file_suffix += "_with_covid"
     
-    args = [(dist, rank, m, disp, p, tm, rc) for dist in dists for rank in inputs 
+    #race_categories = ["total"]  # Options: "total", "all", or specific race categories like "nhblack", "nhwhite", etc.
+    race_categories = ["all"]
+
+    args = [(dist, rank, m, disp, p, tm, rc, op, norm) for dist in dists for rank in inputs 
             for m in missing_flags for disp in disp_params for p in placebo_states 
-            for tm in placebo_times for rc in race_categories]
+            for tm in placebo_times for rc in race_categories for op in outcome_prefixes
+            for norm in normalization_types]
     # Run the function in parallel
     results = Parallel(n_jobs=100)(delayed(main)(dist=i[0], 
-                                                 time_resolution = "biannual",
-                                                 outcome_prefix=outcome_prefix,
+                                                 time_resolution = time_resolution,
+                                                 outcome_prefix=i[7],
                                                  denom_prefix=denom_prefix,
-                                                 rank=i[1], normalize_deaths=normalize_deaths,
+                                                 exclude_covid=exclude_covid,
+                                                 rank=i[1], normalize_deaths=i[8],
                                                  missingness=i[2], 
                                                  disp_param=i[3],
                                                  sample_disp=sample_disp, placebo_state=i[4], placebo_time=i[5], 
                                                  start_date=start_date, end_date=end_date, 
                                                  dobbs_donor_sensitivity=dobbs_donor_sensitivity, 
                                                  model_treated=True, num_chains=4, num_samples=250, num_warmup=1000,
-                                                 states_exclude=states_exclude, file_suffix=file_suffix,
+                                                 states_exclude=states_exclude,
                                                  race_category=i[6]) for i in args)
