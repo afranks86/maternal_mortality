@@ -104,7 +104,7 @@ death_types <- c("preg_deaths", "mat_deaths")
 
 # Generate and save tables
 for (covid in covid_exclusions) {
-    for (rank in 1:6) {
+    for (rank in 4:6) {
         for (death_type in death_types) {
             for (resolution in resolutions) {
                 print(sprintf(
@@ -216,13 +216,12 @@ for (covid in covid_exclusions) {
                 }
 
                 # Define states and categories for PPC
-                ppc_states <- c("TX", "Ban States", "Unexposed States")
+                ppc_states <- c("TX", "States With Bans", "States Without Bans")
                 categories <- c(
                     "total",
                     "nhwhite",
                     "nhblack",
-                    "hispanic",
-                    "nhother"
+                    "hispanic"
                 )
 
                 # Generate and save RMSE PPC plots
@@ -334,24 +333,28 @@ for (covid in covid_exclusions) {
                 )
                 write_lines(results_str, ppc_results_file, append = TRUE)
 
-                # Create mortality table
-                mortality_table <- make_mortality_table(
-                    merged_df |> mutate(type = "Race and ethnicity"),
-                    target_state = "States With Bans"
-                )
+                for (unnormalized_flag in c(TRUE, FALSE)) {
+                    # Create mortality table
+                    mortality_table <- make_mortality_table(
+                        merged_df |> mutate(type = "Race and ethnicity"),
+                        target_state = "States With Bans",
+                        unnormalized = unnormalized_flag
+                    )
 
-                # Save mortality table
-                gtsave(
-                    mortality_table,
-                    sprintf(
-                        "shiny_plots/tables/mortality_table_rank%d_%s_%s%s.png",
-                        rank,
-                        death_type,
-                        resolution,
-                        covid
-                    ),
-                    zoom = 4
-                )
+                    # Save mortality table
+                    gtsave(
+                        mortality_table,
+                        sprintf(
+                            "shiny_plots/tables/mortality_table_rank%d_%s_%s%s%s.png",
+                            rank,
+                            death_type,
+                            resolution,
+                            covid,
+                            ifelse(unnormalized_flag, "_unnormalized", "")
+                        ),
+                        zoom = 4
+                    )
+                }
 
                 # Create state table
                 state_table <- make_state_table(
@@ -414,47 +417,48 @@ for (covid in covid_exclusions) {
     }
 }
 
-# # Generate and save mortality rate explorer plots
-# for (death_type in c(
-#     "mat",
-#     "mat_all",
-#     "preg",
-#     "preglate",
-#     "pregearly",
-#     "wra"
-# )) {
-#     for (show_covid in c(TRUE, FALSE)) {
-#         for (race_display in c("facet", "single")) {
-#             for (selected_race in c(
-#                 "total",
-#                 "nhwhite",
-#                 "nhblack",
-#                 "hispanic",
-#                 "nhother"
-#             )) {
-#                 # Create plot
-#                 p <- plot_mortality_rates(
-#                     data = grouped_death_rate,
-#                     death_type_filter = death_type,
-#                     show_covid_separately = show_covid,
-#                     start_date = "2016-01-01",
-#                     facet_by_race = race_display == "facet",
-#                     race_to_show = selected_race,
-#                     exclude_states = NULL,
-#                     plot_relative_rates = FALSE,
-#                     normalize_before_date = "2020-01-01"
-#                 )
+# Generate and save mortality rate explorer plots
+for (death_type in c(
+    "pregrel"
+    #"mat",
+    #"mat_all",
+    #"preg",
+    #"preglate",
+    #"pregearly",
+    #"wra"
+)) {
+    for (show_covid in c(TRUE, FALSE)) {
+        for (race_display in c("facet", "single")) {
+            for (selected_race in c(
+                "total"
+                # "nhwhite",
+                # "nhblack",
+                # "hispanic",
+                # "nhother"
+            )) {
+                # Create plot
+                p <- plot_mortality_rates(
+                    data = grouped_death_rate,
+                    death_type_filter = death_type,
+                    show_covid_separately = show_covid,
+                    start_date = "2016-01-01",
+                    facet_by_race = race_display == "facet",
+                    race_to_show = selected_race,
+                    exclude_states = NULL,
+                    plot_relative_rates = FALSE,
+                    normalize_before_date = "2020-01-01"
+                )
 
-#                 # Save plot
-#                 filename <- sprintf(
-#                     "mortality_rates/mortality_rates_%s_covid%s_race%s_%s.png",
-#                     death_type,
-#                     ifelse(show_covid, "show", "hide"),
-#                     race_display,
-#                     selected_race
-#                 )
-#                 save_plot_as_png(p, filename, width = 12, height = 10)
-#             }
-#         }
-#     }
-# }
+                # Save plot
+                filename <- sprintf(
+                    "mortality_rates/mortality_rates_%s_covid%s_race%s_%s.png",
+                    death_type,
+                    ifelse(show_covid, "show", "hide"),
+                    race_display,
+                    selected_race
+                )
+                save_plot_as_png(p, filename, width = 12, height = 10)
+            }
+        }
+    }
+}
